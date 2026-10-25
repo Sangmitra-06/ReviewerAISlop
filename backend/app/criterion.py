@@ -1,6 +1,8 @@
-import json, os, re
+import hashlib, json, os, re
 from . import criteria, guide
 from .llm import _chat
+
+OPEN_CACHE = {}
 
 FALLBACK = {
     "summary": "In your own words, what is this paper about?",
@@ -8,7 +10,7 @@ FALLBACK = {
     "weaknesses": "What concerns, in your own words, would you want to raise?",
     "comments": "What would you want to tell the authors that is not a main concern?",
 }
-FOLLOW_FALLBACK = "What led you to that?"
+NUDGE_FALLBACK = {"describe": "Can you say a little more about that?", "judge": "What led you to that?"}
 ANGLE_FALLBACK = "What else, in your own words, would you say about {name}?"
 
 PROMPT_SYS = """You help a paper reviewer think about one part of the review form by asking ONE short question.
@@ -19,7 +21,7 @@ Rules for the question:
 - It does not contain the word "or" and offers no choices.
 - Ask exactly one thing. Never join two questions with "and". Do not introduce ideas such as "claims", "baselines", or "comparisons" unless the reviewer or the definition used them.
 - Opening question: ask what the reviewer thinks or would say about this part, using the definition's own wording. Examples of the shape: "What do you make of how the paper handles ethics?" or "What reasons would you give for this paper?" If the reviewer already wrote notes, build on them.
-- Follow-up: build on the reviewer's own words, for example "You said the consent wording felt thin. What led you to that?" Use only words they wrote. Do not ask them to reinterpret what they said as a strength, a weakness, or a concern, and do not ask them to look something up. Do not add a new concern.
+- Follow-up: the reviewer just gave an answer. If the style of this part is "judge", ask what led them to their view, for example "What led you to that?". If their answer already gives a reason, ask instead what they mean by one of their own phrases, quoting that phrase. Never ask them to look something up, to reinterpret their remark, or to add a new concern. Never say or imply whether the answer is enough or good.
 - Different angle: ask about an aspect of this part that the earlier questions did not cover, still in the definition's own wording. Do not repeat or reword an earlier question.
 - Never repeat an earlier question.
 Return JSON {"question": str}."""
@@ -72,32 +74,39 @@ def explain_part(c):
 
 def next_question(cid, notes_text, history, kind="open"):
     c = criteria.by_id()[cid]
+    style = c.get("style", "judge")
     if kind == "more":
         return {"done": False, "question": f"What else, if anything, would you add under {c['tab']}?",
                 "source": "template", "why": ""}
     if kind == "explain":
         return explain_part(c)
+    if kind == "deeper":
+        kind = "nudge"
     history = [h for h in (history or []) if isinstance(h, dict)]
-    if kind == "deeper" and not history:
+    if kind == "nudge" and not history:
         kind = "open"
     if kind == "open":
         history = []
     d = c["definition"].strip()[:3000] if c["has_definition"] else ""
+    key = (cid, hashlib.sha1(d.encode("utf-8")).hexdigest()[:10])
+    cacheable = kind == "open" and not (notes_text or "").strip()
+    if cacheable and key in OPEN_CACHE:
+        return dict(OPEN_CACHE[key])
     if kind == "open":
         fb = FALLBACK.get(cid, f"In your own words, what would you put under {c['name']}?")
     elif kind == "angle":
         fb = ANGLE_FALLBACK.format(name=c["tab"])
     else:
-        fb = FOLLOW_FALLBACK
+        fb = NUDGE_FALLBACK.get(style, NUDGE_FALLBACK["judge"])
     if not d:
         return {"done": False, "question": fb, "source": "default",
                 "why": "no definition has been added for this part"}
     answered = " ".join(h.get("a", "") for h in history)
-    pool = (notes_text + " " + answered).strip()
+    pool = ((notes_text or "") + " " + answered).strip()
     earlier = [h.get("q", "") for h in history if h.get("q")]
-    wanted = {"open": "an opening question", "deeper": "a follow-up on the reviewer's last answer",
+    wanted = {"open": "an opening question", "nudge": "a follow-up on the reviewer's last answer",
               "angle": "a question from a different angle"}.get(kind, "an opening question")
-    user = (f"Part of the form: {c['name']}\nThe venue's definition:\n{d}\n"
+    user = (f"Part of the form: {c['name']}\nStyle of this part: {style}\nThe venue's definition:\n{d}\n"
             f"The reviewer's notes so far: {notes_text or '(none)'}\n"
             f"Kind of question wanted: {wanted}\n"
             f"Earlier questions and the reviewer's answers: {json.dumps(history) if history else '(none yet)'}\n"
@@ -113,7 +122,10 @@ def next_question(cid, notes_text, history, kind="open"):
         except Exception as e:
             errs = [f"invalid output: {e}"]
         if not errs:
-            return {"done": False, "question": q, "source": "definition", "why": ""}
+            out = {"done": False, "question": q, "source": "definition", "why": ""}
+            if cacheable:
+                OPEN_CACHE[key] = out
+            return dict(out)
         last = errs
         print("[talk]", cid, kind, "retry:", errs[:3], "|", q)
         msgs += [{"role": "assistant", "content": raw or "{}"},

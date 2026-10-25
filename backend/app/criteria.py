@@ -31,6 +31,7 @@ def _read():
         c.setdefault("scale", [])
         c.setdefault("required", True)
         c.setdefault("list", False)
+        c.setdefault("style", "judge")
         fp = os.path.join(DEFS, cid + ".txt")
         if os.path.exists(fp):
             with open(fp, encoding="utf-8-sig") as g:

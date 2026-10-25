@@ -6,7 +6,7 @@ from fastapi import FastAPI, UploadFile, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from . import ingest, llm, store, pointers, synth, criteria, criterion, factcheck
+from . import ingest, llm, store, pointers, synth, criteria, criterion, factcheck, chat, helper
 from . import brief as brief_mod
 from . import guide as guide_mod
 
@@ -73,7 +73,7 @@ class ExplainSpans(BaseModel): paper_id: str; span_ids: list[str]; simpler: bool
 class SelAsk(BaseModel):
     paper_id: str; page: int; rect: list[float]; question: str = "What does this show?"
 class Sort(BaseModel): paper_id: str
-class Draft(BaseModel): paper_id: str; mode: str = "stitch"; field: Optional[str] = None
+class Draft(BaseModel): paper_id: str; mode: str = "smooth"; field: Optional[str] = None
 class Score(BaseModel): paper_id: str; criterion: str; value: str = ""; reason: str = ""
 class Talk(BaseModel): paper_id: str; criterion: str; history: list[dict] = []; kind: str = "open"
 class Skip(BaseModel): paper_id: str; criterion: str; skipped: bool = True; note: str = ""
@@ -230,9 +230,7 @@ def sort_ep(r: Sort):
 @app.post("/draft")
 def draft_ep(r: Draft):
     return synth.make_draft(r.paper_id, spans_of(r.paper_id),
-                            r.mode if r.mode in ("stitch", "smooth") else "stitch", r.field)
-
-
+                            r.mode if r.mode in ("stitch", "smooth") else "smooth", r.field)
 @app.get("/criteria")
 def criteria_ep():
     try:
@@ -387,4 +385,41 @@ def ask_selection(r: SelAsk):
     log_turn(r.paper_id, r.question, out, "ask_selection")
     store.log(r.paper_id, "ask_selection", {"page": r.page, "rect": r.rect, "question": r.question,
                                            "declined": bool(out.get("declined"))})
+    return out
+class Intent(BaseModel):
+    paper_id: str; text: str; criterion: str = ""; last_q: str = ""; stage: str = ""
+
+@app.post("/intent")
+def intent_ep(r: Intent):
+    out = chat.classify(r.text, r.criterion, r.last_q, r.stage)
+    store.log(r.paper_id, "intent", {"criterion": r.criterion, "stage": r.stage,
+                                     "intent": out["intent"], "via": out.get("via", "model")})
+    return out
+
+class Hl(BaseModel): paper_id: str
+class Bear(BaseModel): paper_id: str; criterion: str; text: str
+
+
+@app.post("/help/highlights")
+def help_highlights(r: Hl):
+    return {"items": helper.highlights(r.paper_id, spans_of(r.paper_id))}
+
+
+@app.post("/help/bear")
+def help_bear(r: Bear):
+    c = criteria.by_id().get(r.criterion)
+    if not c:
+        raise HTTPException(400, "unknown criterion")
+    return {"facts": helper.bear(r.paper_id, spans_of(r.paper_id), c["name"], r.text)}
+
+class Plan(BaseModel): paper_id: str; criterion: str; text: str
+
+
+@app.post("/help/plan")
+def help_plan(r: Plan):
+    c = criteria.by_id().get(r.criterion)
+    if not c:
+        raise HTTPException(400, "unknown criterion")
+    out = helper.plan(c["name"], r.text, walk(r.paper_id))
+    store.log(r.paper_id, "plan", {"criterion": r.criterion, **out})
     return out

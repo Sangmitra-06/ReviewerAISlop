@@ -1,12 +1,15 @@
-import json
+import json, re
 from concurrent.futures import ThreadPoolExecutor
 from . import store, pointers, guide, criteria
 from .llm import _chat
 from .verify import BANNED, NUM
 
 TAGLAB = {"just": "Needs justification", "off": "Seems off", "unc": "Unclear", "rev": "Revisit later"}
-CONNECT = {"also", "however", "additionally", "further", "furthermore", "moreover", "while",
-           "although", "but", "overall", "first", "second", "third", "finally"}
+CONNECT = {"also", "however", "additionally", "further", "furthermore", "moreover", "while", "although", "but",
+           "overall", "first", "second", "third", "finally", "then", "next", "lastly", "both", "several", "some",
+           "point", "points", "concern", "concerns", "paper", "authors", "author", "work", "review"}
+CAUSAL = re.compile(r"\b(because|therefore|thus|hence|consequently|as a result|due to|which means|this means|"
+                    r"implies|leading to|resulting in)\b", re.I)
 FALLBACK_Q = "Where should this note go in your review?"
 
 
@@ -84,7 +87,7 @@ def sort_items(pid):
         lookup[c["name"].lower()] = c["id"]
         lookup[c["tab"].lower()] = c["id"]
     its = items(pid)
-    todo = [i for i in its if i["by"] != "user" and i["kind"] != "score"]
+    todo = [i for i in its if i["by"] != "user" and i["kind"] != "score" and not i["field"]]
     if not todo:
         return []
     listing = "\n".join(f"[{i['key']}] " + (f"(tag: {TAGLAB.get(i['tag'], i['tag'])}) " if i.get("tag") else "")
@@ -119,22 +122,27 @@ def sort_items(pid):
 
 
 STITCH_SYS = """You assemble one section of a paper review from the reviewer's own notes. The notes are the ONLY source of content.
-Return JSON {"sentences":[{"text":str,"src":[str]}]} where src lists the note keys (like "n123", "f45" or "s:soundness") each sentence is built from.
+Return JSON {"sentences":[{"text":str,"src":[str]}]} where src lists the note keys (like "n123" or "s:soundness") each sentence is built from.
 Rules:
-1. Use the reviewer's own words wherever possible. Change only tense, person (write as the reviewer, first person is fine), and small connecting words so the notes read as a review.
+1. Use the reviewer's own words wherever possible. Change only tense, person (write as the reviewer, first person is fine), and small connecting words.
 2. Do not add any claim, reason, example, cause, comparison, number, name, or evidence that is not in the notes.
 3. Keep every hedge and every strength of wording exactly ("might", "I think", "seems", "clearly"). Do not use evaluative words the reviewer did not use.
-4. Keep the reviewer's order. Do not rank or reorder by importance. Use every note at least once.
-5. A sentence may cite 1 to 3 notes. Join notes only when they say the same thing."""
+4. Keep the reviewer's order. Use every note at least once. A sentence may cite 1 to 3 notes."""
 
-SMOOTH_SYS = STITCH_SYS.replace(
-    "1. Use the reviewer's own words wherever possible. Change only tense, person (write as the reviewer, first person is fine), and small connecting words so the notes read as a review.",
-    "1. You may rewrite for flow and combine short sentences so the section reads well, writing as the reviewer. Keep the reviewer's meaning and wording as close as you can.")
+COHESIVE_SYS = """You assemble one section of a paper review from the reviewer's own notes. The notes are the ONLY source of content. Write it as a cohesive piece in the reviewer's own voice.
+Return JSON {"sentences":[{"text":str,"src":[str]}]}, where src lists the note keys (like "n123" or "s:soundness") each sentence is built from.
+Rules:
+1. Write as the reviewer, first person where natural. Merge notes that say the same thing, smooth the flow, and fix grammar. Keep the reviewer's own words and register where you can. Do not make it more formal, more forceful, or more polished than the reviewer's wording.
+2. Add nothing: no claim, reason, example, cause, comparison, number, name, or evidence that is not in the notes.
+3. Keep every hedge and level of confidence exactly ("might", "I think", "seems", "clearly"). Do not turn a suggestion into a requirement or a doubt into a conclusion. Do not use evaluative words the reviewer did not use.
+4. Use only neutral joiners (and, also, first, second, then). Do not use because, therefore, thus, hence, or similar unless the reviewer used that word.
+5. Keep distinct points distinct: one sentence per separate point when the section lists several, in the reviewer's order. Do not rank or reorder by importance.
+6. Use every note at least once. A sentence may cite 1 to 3 notes."""
 
 AUDIT_SYS = """You audit sentences drafted from a reviewer's notes. For each sentence, compare it with ONLY the notes cited for it.
 Return JSON {"results":[{"i":int,"ok":bool,"problem":str}]}.
-A sentence is NOT ok if it: states anything the notes do not say (a new claim, reason, example, cause, or comparison); makes a hedge stronger or weaker (for example "might" becomes "is"); makes a positive or negative judgment stronger or weaker; or changes who or what is being talked about.
-Changes of tense, person, and connecting words are fine."""
+A sentence is NOT ok if it: states anything the notes do not say (a new claim, reason, example, cause, or comparison); adds a causal link or contrast the notes do not state; makes a hedge stronger or weaker (for example "might" becomes "is"); makes a positive or negative judgment stronger or weaker; or changes who or what is being talked about.
+Changes of tense, person, grammar, and neutral joining words are fine."""
 
 
 def clean(data):
@@ -162,6 +170,9 @@ def check(sents, pool, mode):
         for w in BANNED.findall(s["text"]):
             if w.lower() not in low:
                 errs.append(f"sentence {i}: the word '{w}' is not in the cited notes")
+        for w in {x.lower() for x in CAUSAL.findall(s["text"])}:
+            if w not in low:
+                errs.append(f"sentence {i}: '{w}' claims a link the reviewer did not state")
         for n in NUM.findall(s["text"]):
             if n not in notes_text:
                 errs.append(f"sentence {i}: number {n} is not in the cited notes")
@@ -187,7 +198,7 @@ def audit(sents, pool):
 def draft_field(field, its, mode):
     pool = {i["key"]: i["text"] for i in its}
     listing = "\n".join(f"[{i['key']}] {i['text']}" for i in its)
-    msgs = [{"role": "system", "content": STITCH_SYS if mode == "stitch" else SMOOTH_SYS},
+    msgs = [{"role": "system", "content": STITCH_SYS if mode == "stitch" else COHESIVE_SYS},
             {"role": "user", "content": f"Section: {names()[field]}\nThe reviewer's notes, in their order:\n{listing}"}]
     for _ in range(3):
         raw = ""
@@ -205,7 +216,7 @@ def draft_field(field, its, mode):
     return {"sentences": [{"text": i["text"], "src": [i["key"]]} for i in its], "fallback": True}
 
 
-def make_draft(pid, spans, mode="stitch", only=None):
+def make_draft(pid, spans, mode="smooth", only=None):
     from . import factcheck
     valid = names()
     cfg = criteria.load()

@@ -6,10 +6,10 @@
   "fact_gate": true,
   "allow_dispute": true,
   "criteria": [
-    {"id": "summary", "name": "Paper summary", "tab": "Summary", "type": "text", "required": true},
+    {"id": "summary", "name": "Paper summary", "tab": "Summary", "type": "text", "required": true, "style": "describe"},
     {"id": "strengths", "name": "Summary of strengths", "tab": "Strengths", "type": "text", "required": true, "list": true},
     {"id": "weaknesses", "name": "Summary of weaknesses", "tab": "Weaknesses", "type": "text", "required": true, "list": true},
-    {"id": "comments", "name": "Comments, suggestions and typos", "tab": "Comments", "type": "text", "required": false, "list": true},
+    {"id": "comments", "name": "Comments, suggestions and typos", "tab": "Comments", "type": "text", "required": false, "list": true, "style": "describe"},
     {"id": "soundness", "name": "Soundness", "tab": "Soundness", "type": "score", "required": true,
      "scale": [{"value": "5", "label": ""}, {"value": "4", "label": ""}, {"value": "3", "label": ""},
                {"value": "2", "label": ""}, {"value": "1", "label": ""}]},
